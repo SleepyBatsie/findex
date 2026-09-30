@@ -1,0 +1,2 @@
+﻿éléphant conjugated text with combining marks and UPPERCASE words.
+Python streaming tokenizer test!
