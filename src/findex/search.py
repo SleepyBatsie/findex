@@ -1,93 +1,103 @@
-import argparse
-
-from pathlib import Path
-import time
-import tracemalloc
-
-from findex.index import InvertedIndex, Posting, DocMeta
-
-
-def intersect_merge(p1: list[Posting], p2: list[Posting]) -> list[Posting]:
-    """Двовказівниковий алгоритм перетину (AND) для відсортованих постінгів - O(N + M)."""
-    i, j = 0, 0
-    result = []
-    while i < len(p1) and j < len(p2):
-        if p1[i].doc_id == p2[j].doc_id:
-            result.append(Posting(doc_id=p1[i].doc_id, tf=p1[i].tf + p2[j].tf))
-            i += 1
-            j += 1
-        elif p1[i].doc_id < p2[j].doc_id:
-            i += 1
-        else:
-            j += 1
-    return result
+# src/findex/search.py
+from dataclasses import dataclass, field
+import heapq
+from typing import List, Optional, Dict
+from findex.index import InvertedIndex
+from findex.ranking import Scorer, BM25Scorer
+from findex.storage import load_index
 
 
-def intersect_set(p1: list[Posting], p2: list[Posting]) -> list[Posting]:
-    """Перетин через множини (set intersection)."""
-    map1 = {p.doc_id: p for p in p1}
-    map2 = {p.doc_id: p for p in p2}
-    common_ids = set(map1.keys()) & set(map2.keys())
-    return [
-        Posting(doc_id=doc_id, tf=map1[doc_id].tf + map2[doc_id].tf)
-        for doc_id in sorted(common_ids)
-    ]
+@dataclass(order=True)
+class SearchResult:
+    """
+    Результат пошуку. order=True дозволяє heapq.nlargest
+    порівнювати об'єкти за першим полем (score).
+    """
+    score: float = 0.0
+    doc_id: str = field(default="", compare=False)
 
 
-def search_boolean(
-    index: InvertedIndex, query: str, engine: str = "merge"
-) -> list[Posting]:
-    from findex.tokenize import tokenize
-
-    terms = list(tokenize(query))
+def search_boolean(index: InvertedIndex, query: str, engine: str = "merge") -> List[SearchResult]:
+    """Булевий пошук з поверненням об'єктів SearchResult (сумісність із тестами Лаб 1-2)."""
+    terms = query.lower().split()
     if not terms:
         return []
 
-    result = index.get_postings(terms[0])
-    intersect_fn = intersect_merge if engine == "merge" else intersect_set
+    matching_docs = None
+    for term in terms:
+        if term not in index:
+            return []
+        term_docs = set(index[term].keys())
+        if matching_docs is None:
+            matching_docs = term_docs
+        else:
+            matching_docs &= term_docs
 
-    for term in terms[1:]:
-        next_postings = index.get_postings(term)
-        result = intersect_fn(result, next_postings)
+    if not matching_docs:
+        return []
 
-    return result
+    return [SearchResult(doc_id=doc_id) for doc_id in sorted(matching_docs)]
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Search in inverted index.")
-    parser.add_argument("index_path", type=Path, help="Path to index file")
-    parser.add_argument("query", type=str, help="Search query (AND space-separated)")
-    parser.add_argument(
-        "--engine",
-        choices=["merge", "set"],
-        default="merge",
-        help="Intersection engine",
-    )
+def search_ranked(
+    index: InvertedIndex,
+    query: str,
+    scorer: Optional[Scorer] = None,
+    top_k: int = 10,
+) -> List[SearchResult]:
+    """
+    Ранжований пошук із накопиченням балів та відбором top-k за допомогою heapq.nlargest.
+    """
+    if scorer is None:
+        scorer = BM25Scorer()
+
+    terms = query.lower().split()
+    if not terms:
+        return []
+
+    doc_scores: Dict[str, float] = {}
+    num_docs = index.num_docs
+    avg_len = index.avg_doc_length
+
+    for term in terms:
+        if term not in index:
+            continue
+        postings = index[term]  # {doc_id: [pos1, pos2, ...]}
+        df = index.df(term)
+
+        for doc_id, positions in postings.items():
+            tf = len(positions)
+            doc_len = index.doc_len(doc_id)
+
+            term_score = scorer.score(
+                tf=tf,
+                df=df,
+                num_docs=num_docs,
+                doc_len=doc_len,
+                avg_doc_len=avg_len,
+            )
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0.0) + term_score
+
+    results = [SearchResult(score=score, doc_id=doc_id) for doc_id, score in doc_scores.items()]
+    return heapq.nlargest(top_k, results)
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="findex Search Engine CLI")
+    parser.add_argument("index_path", help="Path to index file")
+    parser.add_argument("query", help="Search query string")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of results to return")
     args = parser.parse_args()
 
-    tracemalloc.start()
-    start_time = time.perf_counter()
-
-    from findex.storage import load_index
-
     idx = load_index(args.index_path)
+    results = search_ranked(idx, args.query, top_k=args.top_k)
 
-    results = search_boolean(idx, args.query, engine=args.engine)
-
-    elapsed = time.perf_counter() - start_time
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    print(f"=== Search Results (engine: {args.engine}) ===")
-    print(f"Query: '{args.query}'")
-    print(f"Found matches: {len(results)}")
-    for res in results:
-        meta = idx.doc_meta.get(res.doc_id)
-        path_str = f" ({meta.path})" if meta and meta.path else ""
-        print(f"  - doc_id: {res.doc_id}{path_str} | tf_sum: {res.tf}")
-
-    print(f"\nElapsed time: {elapsed:.6f} s")
-    print(f"Peak memory:  {peak / 1024 / 1024:.2f} MB")
+    print(f"=== Search Results for '{args.query}' ===")
+    print(f"Found matches: {len(results)}\n")
+    for rank, res in enumerate(results, 1):
+        print(f"{rank}. [Score: {res.score:.4f}] Doc ID: {res.doc_id}")
 
 
 if __name__ == "__main__":

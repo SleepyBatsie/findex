@@ -1,124 +1,146 @@
-import argparse
-
-from collections import defaultdict
-from dataclasses import dataclass
-from pathlib import Path
-import time
-import tracemalloc
-from typing import Iterator
-
-from findex.corpus import iter_documents
-from findex.tokenize import tokenize
+# src/findex/index.py
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Dict, Iterator, List, Any, Optional
+from findex.corpus import Document
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class Posting:
+    """Запис у postings list для збереження інформації про документ та позиції."""
     doc_id: str
-    tf: int  # Частота терміна в документі
+    tf: int = 0
+    positions: List[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.tf, list):
+            self.positions = self.tf
+            self.tf = len(self.positions)
+        elif isinstance(self.positions, int):
+            self.tf = self.positions
+            self.positions = []
+        elif isinstance(self.positions, list) and self.positions and not self.tf:
+            self.tf = len(self.positions)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Posting):
+            if self.doc_id != other.doc_id:
+                return False
+            if self.tf != other.tf:
+                return False
+            if self.positions and other.positions:
+                return self.positions == other.positions
+            return True
+        return False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class DocMeta:
+    """Метадані заіндексованого документа."""
     doc_id: str
-    length: int  # Загальна кількість токенів у документі
-    path: str | None
+    length: int
+    path: Optional[str] = None
 
 
-class InvertedIndex:
+class InvertedIndex(Mapping):
+    """
+    Позиційний інвертований індекс, що реалізує collections.abc.Mapping.
+    Дозволяє доступ через dunder-методи: len(idx), 'term' in idx, idx['term'].
+    """
 
-    def __init__(self, with_positions: bool = False):
+    __slots__ = ("_index", "_doc_lengths", "doc_meta", "with_positions", "__dict__")
+
+    def __init__(self, with_positions: bool = True) -> None:
+        self._index: Dict[str, Dict[str, List[int]]] = {}
+        self._doc_lengths: Dict[str, int] = {}
+        self.doc_meta: Dict[str, DocMeta] = {}
         self.with_positions = with_positions
-        # dict[term -> dict[doc_id -> tf або list[positions]]]
-        self.index: dict[str, dict[str, int | list[int]]] = defaultdict(dict)
-        self.doc_meta: dict[str, DocMeta] = {}
 
-    def build(self, corpus_stream: Iterator) -> None:
-        """Будує індекс одним проходом по ледачому пайплайну з Лаби 1."""
-        for doc in corpus_stream:
-            tokens = list(tokenize(doc.text))
+    @property
+    def doc_metas(self) -> Dict[str, DocMeta]:
+        """Аліас для сумісності доступу через doc_metas."""
+        return self.doc_meta
+
+    @doc_metas.setter
+    def doc_metas(self, value: Dict[str, DocMeta]) -> None:
+        self.doc_meta = value
+
+    @property
+    def index(self) -> Dict[str, Dict[str, List[int]]]:
+        return self._index
+
+    @index.setter
+    def index(self, value: Dict[str, Dict[str, List[int]]]) -> None:
+        self._index = value
+
+    def build(self, docs: List[Document]) -> None:
+        """Побудова індексу з очищенням кешу avg_doc_length."""
+        self._index.clear()
+        self._doc_lengths.clear()
+        self.doc_meta.clear()
+
+        if "avg_doc_length" in self.__dict__:
+            del self.__dict__["avg_doc_length"]
+
+        for doc in docs:
+            tokens = doc.text.lower().split()
             doc_len = len(tokens)
-            self.doc_meta[doc.doc_id] = DocMeta(
-                doc_id=doc.doc_id,
-                length=doc_len,
-                path=str(doc.path) if doc.path else None,
-            )
+            self._doc_lengths[doc.doc_id] = doc_len
+            self.doc_meta[doc.doc_id] = DocMeta(doc_id=doc.doc_id, length=doc_len, path=getattr(doc, "path", None))
 
-            if not self.with_positions:
-                term_counts: dict[str, int] = defaultdict(int)
-                for token in tokens:
-                    term_counts[token] += 1
-                for term, count in term_counts.items():
-                    self.index[term][doc.doc_id] = count
-            else:
-                for pos, token in enumerate(tokens):
-                    if doc.doc_id not in self.index[token]:
-                        self.index[token][doc.doc_id] = []
-                    self.index[token][doc.doc_id].append(pos)  # type: ignore
+            for pos, term in enumerate(tokens):
+                if term not in self._index:
+                    self._index[term] = {}
+                if doc.doc_id not in self._index[term]:
+                    self._index[term][doc.doc_id] = []
+                self._index[term][doc.doc_id].append(pos)
 
-    def get_postings(self, term: str) -> list[Posting]:
-        """Повертає відсортований за doc_id список постінгів."""
-        if term not in self.index:
+    def get_postings(self, term: str) -> List[Posting]:
+        """Повертає список Posting для заданого терміна (сумісність із тестами Лаб 1-2)."""
+        term_clean = term.lower()
+        if term_clean not in self._index:
             return []
+        return [
+            Posting(doc_id=doc_id, tf=len(positions), positions=positions)
+            for doc_id, positions in self._index[term_clean].items()
+        ]
 
-        raw_postings = self.index[term]
-        if self.with_positions:
-            postings = [
-                Posting(doc_id=doc_id, tf=len(pos_list))  # type: ignore
-                for doc_id, pos_list in raw_postings.items()
-            ]
-        else:
-            postings = [
-                Posting(doc_id=doc_id, tf=count)  # type: ignore
-                for doc_id, count in raw_postings.items()
-            ]
+    # --- Mapping Protocol (Dunder Methods) ---
 
-        # Важливо: сортуємо за doc_id для подальшого dwo-pointer merge
-        return sorted(postings, key=lambda p: p.doc_id)
+    def __getitem__(self, term: str) -> Dict[str, List[int]]:
+        return self._index[term]
 
+    def __len__(self) -> int:
+        return len(self._index)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Build and save inverted index."
-    )
-    parser.add_argument(
-        "data_dir", type=Path, help="Path to corpus directory/file"
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("index.bin"),
-        help="Output index file path",
-    )
-    parser.add_argument(
-        "--format",
-        choices=["pickle", "json"],
-        default="pickle",
-        help="Serialization format",
-    )
-    args = parser.parse_args()
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._index)
 
-    tracemalloc.start()
-    start_time = time.perf_counter()
+    def __contains__(self, term: object) -> bool:
+        return term in self._index
 
-    corpus_stream = iter_documents(args.data_dir)
-    idx = InvertedIndex()
-    idx.build(corpus_stream)
+    def __repr__(self) -> str:
+        return f"<Index terms={len(self)} docs={self.num_docs}>"
 
-    from findex.storage import save_index
+    # --- Properties & Methods ---
 
-    save_index(idx, args.out, format=args.format)
+    @property
+    def num_docs(self) -> int:
+        return len(self.doc_meta)
 
-    elapsed = time.perf_counter() - start_time
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    @cached_property
+    def avg_doc_length(self) -> float:
+        if not self._doc_lengths:
+            return 0.0
+        return sum(self._doc_lengths.values()) / len(self._doc_lengths)
 
-    print(f"=== Indexing Complete ===")
-    print(f"Documents indexed: {len(idx.doc_meta)}")
-    print(f"Unique terms:     {len(idx.index)}")
-    print(f"Output file:      {args.out}")
-    print(f"Elapsed time:     {elapsed:.4f} s")
-    print(f"Peak memory:      {peak / 1024 / 1024:.2f} MB")
+    def doc_len(self, doc_id: str) -> int:
+        return self._doc_lengths.get(doc_id, 0)
+
+    def df(self, term: str) -> int:
+        """Document Frequency."""
+        return len(self._index[term]) if term in self._index else 0
 
 
-if __name__ == "__main__":
-    main()
+Index = InvertedIndex
