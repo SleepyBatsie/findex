@@ -1,9 +1,8 @@
 # tests/test_lab3_mod3.py
-import pytest
-from findex.ast import Term, Phrase, And, Or, Not
-from findex.parser import parse_query
+from findex.ast import And, Not, Or, Phrase, Term
 from findex.corpus import Document
 from findex.index import Index
+from findex.parser import parse_query
 
 
 def test_ast_operators_overloading():

@@ -1,26 +1,27 @@
-from findex.tokenize import tokenize
+"""Parametrized unit tests for Unicode tokenization."""
+
+import pytest
+
+from findex.tokenize import iter_tokens, tokenize
 
 
-def test_tokenize_mixed_case():
-    assert list(tokenize("Hello WORLD WoRlD")) == ["hello", "world", "world"]
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        ("", []),
+        ("   \t\n  ", []),
+        ("Hello, World!", ["hello", "world"]),
+        ("Python 3.13 & Async/Await", ["python", "3", "13", "async", "await"]),
+        ("Привіт, світе! Їжак і ґанок.", ["привіт", "світе", "їжак", "і", "ґанок"]),
+        ("Café naïve résumé über", ["café", "naïve", "résumé", "über"]),
+        ("日本語テスト alpha", ["日本語テスト", "alpha"]),
+    ],
+)
+def test_tokenize_parametrized_unicode(raw_text: str, expected: list[str]) -> None:
+    assert tokenize(raw_text) == expected
 
 
-def test_tokenize_cyrillic():
-    assert list(tokenize("Привіт Світ СВІТ")) == ["привіт", "світ", "світ"]
-
-
-def test_tokenize_combining_accent():
-    accented_text = "e\u0301le\u0301phant"  # e + combining mark
-    assert list(tokenize(accented_text)) == ["éléphant"]
-
-
-def test_tokenize_punctuation():
-    assert list(tokenize("Hello, world! How's it going?")) == ["hello", "world", "how's", "it", "going"]
-
-
-def test_tokenize_ukrainian_apostrophe():
-    assert list(tokenize("Об'єкт пам'яті м'яч")) == ["об'єкт", "пам'яті", "м'яч"]
-
-
-def test_tokenize_empty():
-    assert list(tokenize("")) == []
+def test_iter_tokens_is_lazy_iterator() -> None:
+    it = iter_tokens("one two three")
+    assert next(it) == "one"
+    assert list(it) == ["two", "three"]

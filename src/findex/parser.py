@@ -1,42 +1,58 @@
-# src/findex/parser.py
+"""Recursive descent parser for boolean and phrase search queries."""
+
 import re
-from typing import List, Tuple, Optional
-from findex.ast import ASTNode, Term, Phrase, And, Or, Not
+
+from findex.ast import And, ASTNode, Not, Or, Phrase, Term
+
+_TOKEN_SPECIFICATION: list[tuple[str, str]] = [
+    ("LPAREN", r"\("),
+    ("RPAREN", r"\)"),
+    ("PHRASE", r'"[^"]*"'),
+    ("AND", r"\bAND\b"),
+    ("OR", r"\bOR\b"),
+    ("NOT", r"\bNOT\b"),
+    ("WORD", r'[^\s()"]+'),
+]
+
+_TOK_REGEX: re.Pattern[str] = re.compile(
+    "|".join(f"(?P<{name}>{pattern})" for name, pattern in _TOKEN_SPECIFICATION),
+    flags=re.UNICODE,
+)
 
 
-def tokenize_query(query: str) -> List[Tuple[str, str]]:
-    """
-    Розбиває рядок запиту на токени:
-    LPAREN, RPAREN, PHRASE, AND, OR, NOT, WORD.
-    """
-    token_specification = [
-        ("LPAREN", r"\("),
-        ("RPAREN", r"\)"),
-        ("PHRASE", r'"[^"]*"'),
-        ("AND", r"\bAND\b"),
-        ("OR", r"\bOR\b"),
-        ("NOT", r"\bNOT\b"),
-        ("WORD", r'[^\s()"]+'),
-    ]
-    tok_regex = "|".join(f"(?P<{pair[0]}>{pair[1]})" for pair in token_specification)
-    tokens = []
-    for mo in re.finditer(tok_regex, query):
-        kind = mo.lastgroup
-        value = mo.group()
+def tokenize_query(query: str) -> list[tuple[str, str]]:
+    """Tokenize a raw boolean query string into (token_kind, token_value) pairs."""
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    for match in _TOK_REGEX.finditer(query):
+        gap = query[pos : match.start()]
+        if gap.strip():
+            raise ValueError(f"Invalid syntax near: {gap.strip()}")
+        pos = match.end()
+
+        kind = match.lastgroup
+        if kind is None:
+            continue
+        value = match.group()
         if kind == "PHRASE":
-            value = value[1:-1]  # Прибираємо зовнішні лапки
+            value = value[1:-1]
         tokens.append((kind, value))
+
+    trailing = query[pos:]
+    if trailing.strip():
+        raise ValueError(f"Invalid syntax near: {trailing.strip()}")
+
     return tokens
 
 
 class QueryParser:
-    """Парсер мови запитів методом рекурсивного спуску."""
+    """Recursive descent parser producing an ASTNode tree."""
 
     def __init__(self, query: str) -> None:
-        self.tokens: List[Tuple[str, str]] = tokenize_query(query)
+        self.tokens: list[tuple[str, str]] = tokenize_query(query)
         self.pos: int = 0
 
-    def current_token(self) -> Optional[Tuple[str, str]]:
+    def current_token(self) -> tuple[str, str] | None:
         if self.pos < len(self.tokens):
             return self.tokens[self.pos]
         return None
@@ -81,7 +97,7 @@ class QueryParser:
 
     def _parse_primary(self) -> ASTNode:
         tok = self.current_token()
-        if not tok:
+        if tok is None:
             raise ValueError("Unexpected end of query")
 
         kind, val = tok
@@ -92,17 +108,18 @@ class QueryParser:
                 raise ValueError("Missing closing parenthesis")
             self.pos += 1
             return node
-        elif kind == "PHRASE":
+        if kind == "PHRASE":
             self.pos += 1
             words = val.split()
+            if not words:
+                raise ValueError("Empty phrase in query")
             return Phrase(words)
-        elif kind == "WORD":
+        if kind == "WORD":
             self.pos += 1
             return Term(val)
-        else:
-            raise ValueError(f"Unexpected token: {val}")
+        raise ValueError(f"Unexpected token: {val}")
 
 
 def parse_query(query: str) -> ASTNode:
-    """Зручна функція-обгортка для парсингу рядка запиту в AST."""
+    """Parse a query string into an ASTNode."""
     return QueryParser(query).parse()

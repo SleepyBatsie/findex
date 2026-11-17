@@ -1,17 +1,18 @@
-# src/findex/ast.py
+"""Abstract Syntax Tree (AST) nodes for boolean and phrase queries."""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Set
+
 from findex.index import InvertedIndex
+from findex.tokenize import tokenize
 
 
 class ASTNode(ABC):
-    """Базовий клас для всіх вузлів синтаксичного дерева (AST)."""
+    """Base class for all query AST nodes."""
 
     @abstractmethod
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
-        """Оцінює вузол та повертає множину doc_id, що відповідають запиту."""
-        pass
+    def evaluate(self, index: InvertedIndex) -> set[str]:
+        """Evaluate node against an InvertedIndex and return matching doc_ids."""
 
     def __and__(self, other: "ASTNode") -> "And":
         return And(self, other)
@@ -25,10 +26,15 @@ class ASTNode(ABC):
 
 @dataclass(frozen=True)
 class Term(ASTNode):
+    """Single term leaf node."""
+
     term: str
 
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
-        clean_term = self.term.lower()
+    def evaluate(self, index: InvertedIndex) -> set[str]:
+        tokens = tokenize(self.term)
+        if not tokens:
+            return set()
+        clean_term = tokens[0]
         if clean_term in index:
             return set(index[clean_term].keys())
         return set()
@@ -36,15 +42,18 @@ class Term(ASTNode):
 
 @dataclass(frozen=True)
 class Phrase(ASTNode):
-    words: List[str]
+    """Exact sequential phrase node using positional postings."""
 
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
-        if not self.words:
+    words: list[str]
+
+    def evaluate(self, index: InvertedIndex) -> set[str]:
+        clean_words: list[str] = []
+        for word in self.words:
+            clean_words.extend(tokenize(word))
+
+        if not clean_words:
             return set()
 
-        clean_words = [w.lower() for w in self.words]
-
-        # 1. Знаходимо документи, які містять УСІ слова з фрази
         first_term = clean_words[0]
         if first_term not in index:
             return set()
@@ -55,12 +64,14 @@ class Phrase(ASTNode):
                 return set()
             candidate_docs &= set(index[word].keys())
 
-        # 2. Перевіряємо послідовність позицій у знайдених документах
-        matching_docs = set()
+        matching_docs: set[str] = set()
         for doc_id in candidate_docs:
             pos_lists = [index[word][doc_id] for word in clean_words]
-            for p0 in pos_lists[0]:
-                if all((p0 + i) in pos_lists[i] for i in range(1, len(clean_words))):
+            for start_pos in pos_lists[0]:
+                if all(
+                    (start_pos + offset) in pos_lists[offset]
+                    for offset in range(1, len(clean_words))
+                ):
                     matching_docs.add(doc_id)
                     break
 
@@ -69,27 +80,32 @@ class Phrase(ASTNode):
 
 @dataclass(frozen=True)
 class And(ASTNode):
+    """Logical AND node."""
+
     left: ASTNode
     right: ASTNode
 
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
+    def evaluate(self, index: InvertedIndex) -> set[str]:
         return self.left.evaluate(index) & self.right.evaluate(index)
 
 
 @dataclass(frozen=True)
 class Or(ASTNode):
+    """Logical OR node."""
+
     left: ASTNode
     right: ASTNode
 
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
+    def evaluate(self, index: InvertedIndex) -> set[str]:
         return self.left.evaluate(index) | self.right.evaluate(index)
 
 
 @dataclass(frozen=True)
 class Not(ASTNode):
+    """Logical NOT (complement) node."""
+
     operand: ASTNode
 
-    def evaluate(self, index: InvertedIndex) -> Set[str]:
-        doc_map = getattr(index, "doc_meta", getattr(index, "doc_metas", {}))
-        all_docs = set(doc_map.keys())
+    def evaluate(self, index: InvertedIndex) -> set[str]:
+        all_docs = set(index.doc_meta.keys())
         return all_docs - self.operand.evaluate(index)

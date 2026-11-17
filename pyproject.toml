@@ -1,20 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "findex"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.4.0"
+description = "Full-text search engine with inverted index, BM25/TF-IDF ranking, boolean AST parser, and CLI."
 readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
 authors = [
-    { name = "SleepyBatsie", email = "8546604@stud.kai.edu.ua" }
+    { name = "findex developer" }
 ]
-requires-python = ">=3.13"
-dependencies = []
-
-[build-system]
-requires = ["uv_build>=0.12.15,<0.13.0"]
-build-backend = "uv_build"
+keywords = ["search-engine", "bm25", "tf-idf", "inverted-index", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+]
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
-    "ruff>=0.16.7",
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "hypothesis>=6.100.0",
+    "pyright>=1.1.380",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+findex = "findex.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/findex"]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "strict"
+pythonVersion = "3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests taking longer than 1 second (deselect with '-m \"not slow\"')",
 ]

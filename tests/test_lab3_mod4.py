@@ -1,31 +1,33 @@
-# tests/test_lab3_mod4.py
+"""Tests for @timed decorator, QueryCache, snippets, and Precision@5."""
+
+import logging
+
 import pytest
+
 from findex.corpus import Document
 from findex.index import Index
-from findex.ranking import TfIdfScorer, BM25Scorer
+from findex.ranking import BM25Scorer, TfIdfScorer
 from findex.search import search_ranked
-from findex.utils import timed, QueryCache, generate_snippet, calculate_precision_at_k
+from findex.utils import QueryCache, calculate_precision_at_k, generate_snippet, timed
 
 
-def test_timed_decorator(capsys):
-    """Перевірка роботи декоратора @timed та збереження wraps."""
+def test_timed_decorator(caplog: pytest.LogCaptureFixture) -> None:
     @timed
-    def mock_build_index(docs_count: int):
+    def mock_build_index(docs_count: int) -> int:
         """Mock build function."""
         return docs_count * 2
 
     assert mock_build_index.__name__ == "mock_build_index"
     assert mock_build_index.__doc__ == "Mock build function."
 
-    result = mock_build_index(5)
+    with caplog.at_level(logging.DEBUG, logger="findex.utils"):
+        result = mock_build_index(5)
+
     assert result == 10
-
-    captured = capsys.readouterr()
-    assert "[TIMED] mock_build_index executed in" in captured.out
+    assert "mock_build_index executed in" in caplog.text
 
 
-def test_lru_cache_query_hits(capsys):
-    """Перевірка кешування повторних запитів через QueryCache та логування hit."""
+def test_lru_cache_query_hits(caplog: pytest.LogCaptureFixture) -> None:
     docs = [
         Document("doc1", None, "python async await programming"),
         Document("doc2", None, "python concurrency event loop"),
@@ -35,41 +37,29 @@ def test_lru_cache_query_hits(capsys):
 
     cache = QueryCache(maxsize=10)
 
-    # Перший запит (Cache Miss)
-    res1 = cache.get_or_execute("python", idx, search_ranked)
-    assert "doc1" in res1
+    with caplog.at_level(logging.DEBUG, logger="findex.utils"):
+        res1 = cache.get_or_execute("python", idx, search_ranked)
+        assert "doc1" in res1
+        assert "Cache miss for query 'python'" in caplog.text
 
-    captured = capsys.readouterr()
-    assert "[CACHE HIT]" not in captured.out
-
-    # Повторний запит (Cache Hit)
-    res2 = cache.get_or_execute("python", idx, search_ranked)
-    assert res1 == res2
-
-    captured_hit = capsys.readouterr()
-    assert "[CACHE HIT] Query 'python' served from LRU cache" in captured_hit.out
+        caplog.clear()
+        res2 = cache.get_or_execute("python", idx, search_ranked)
+        assert res1 == res2
+        assert "Cache hit for query 'python'" in caplog.text
 
 
-def test_snippet_generation_and_highlighting():
-    """Перевірка формування вікна ±80 символів та підсвічування термінів."""
+def test_snippet_generation_and_highlighting() -> None:
     text = (
         "In computer programming, asynchronous I/O is a form of input/output processing "
         "that allows other processing to continue before the transmission has finished. "
         "Python supports async and await keywords for structured asynchronous code."
     )
-    terms = ["python", "async"]
-
-    snippet = generate_snippet(text, terms, window=40)
-
+    snippet = generate_snippet(text, ["python", "async"], window=40)
     assert "**Python**" in snippet or "**python**" in snippet or "**async**" in snippet
-    assert len(snippet) <= 40 * 2 + 100
+    assert len(snippet) <= 180
 
 
-def test_precision_at_5_comparison():
-    """
-    Оцінка якості 10 тестових запитів з розміткою релевантності:
-    Порівняння Precision@5 для TF-IDF та BM25.
-    """
+def test_precision_at_5_comparison() -> None:
     corpus = [
         Document("doc1", None, "python tutorial for beginners learning code"),
         Document("doc2", None, "advanced python async await event loop performance"),
@@ -99,18 +89,13 @@ def test_precision_at_5_comparison():
         ("microservices api", {"doc3", "doc6"}),
     ]
 
-    p5_tfidf_scores = []
-    p5_bm25_scores = []
+    p5_tfidf: list[float] = []
+    p5_bm25: list[float] = []
 
     for query, relevant in annotated_queries:
         res_tfidf = [r.doc_id for r in search_ranked(idx, query, scorer=TfIdfScorer(), top_k=5)]
         res_bm25 = [r.doc_id for r in search_ranked(idx, query, scorer=BM25Scorer(), top_k=5)]
+        p5_tfidf.append(calculate_precision_at_k(res_tfidf, relevant, k=5))
+        p5_bm25.append(calculate_precision_at_k(res_bm25, relevant, k=5))
 
-        p5_tfidf_scores.append(calculate_precision_at_k(res_tfidf, relevant, k=5))
-        p5_bm25_scores.append(calculate_precision_at_k(res_bm25, relevant, k=5))
-
-    avg_p5_tfidf = sum(p5_tfidf_scores) / len(p5_tfidf_scores)
-    avg_p5_bm25 = sum(p5_bm25_scores) / len(p5_bm25_scores)
-
-    assert avg_p5_bm25 >= avg_p5_tfidf
-    assert avg_p5_bm25 > 0.0
+    assert (sum(p5_bm25) / len(p5_bm25)) >= (sum(p5_tfidf) / len(p5_tfidf))

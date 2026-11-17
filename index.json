@@ -1,0 +1,259 @@
+{
+  "version": 1,
+  "with_positions": true,
+  "doc_lengths": {
+    "doc1.txt": 9,
+    "doc2.txt": 23,
+    "doc3.txt": 15
+  },
+  "doc_meta": {
+    "doc1.txt": {
+      "doc_id": "doc1.txt",
+      "length": 9,
+      "path": "data\\doc1.txt"
+    },
+    "doc2.txt": {
+      "doc_id": "doc2.txt",
+      "length": 23,
+      "path": "data\\doc2.txt"
+    },
+    "doc3.txt": {
+      "doc_id": "doc3.txt",
+      "length": 15,
+      "path": "data\\doc3.txt"
+    }
+  },
+  "index": {
+    "2026": {
+      "doc1.txt": [
+        6
+      ]
+    },
+    "and": {
+      "doc1.txt": [
+        7
+      ],
+      "doc3.txt": [
+        8
+      ]
+    },
+    "combining": {
+      "doc3.txt": [
+        6
+      ]
+    },
+    "conjugated": {
+      "doc3.txt": [
+        3
+      ]
+    },
+    "contains": {
+      "doc1.txt": [
+        1
+      ]
+    },
+    "don": {
+      "doc2.txt": [
+        20
+      ]
+    },
+    "e": {
+      "doc3.txt": [
+        0
+      ]
+    },
+    "it": {
+      "doc1.txt": [
+        0
+      ]
+    },
+    "le": {
+      "doc3.txt": [
+        1
+      ]
+    },
+    "like": {
+      "doc1.txt": [
+        5
+      ]
+    },
+    "marks": {
+      "doc3.txt": [
+        7
+      ]
+    },
+    "numbers": {
+      "doc1.txt": [
+        4
+      ]
+    },
+    "phant": {
+      "doc3.txt": [
+        2
+      ]
+    },
+    "punctuation": {
+      "doc1.txt": [
+        8
+      ]
+    },
+    "python": {
+      "doc3.txt": [
+        11
+      ]
+    },
+    "some": {
+      "doc1.txt": [
+        2
+      ]
+    },
+    "stop": {
+      "doc2.txt": [
+        22
+      ]
+    },
+    "streaming": {
+      "doc3.txt": [
+        12
+      ]
+    },
+    "t": {
+      "doc2.txt": [
+        21
+      ]
+    },
+    "test": {
+      "doc3.txt": [
+        14
+      ]
+    },
+    "text": {
+      "doc1.txt": [
+        3
+      ],
+      "doc3.txt": [
+        4
+      ]
+    },
+    "tokenizer": {
+      "doc3.txt": [
+        13
+      ]
+    },
+    "uppercase": {
+      "doc3.txt": [
+        9
+      ]
+    },
+    "with": {
+      "doc3.txt": [
+        5
+      ]
+    },
+    "words": {
+      "doc3.txt": [
+        10
+      ]
+    },
+    "а": {
+      "doc2.txt": [
+        18
+      ]
+    },
+    "апострофами": {
+      "doc2.txt": [
+        11
+      ]
+    },
+    "документ": {
+      "doc2.txt": [
+        4
+      ]
+    },
+    "другий": {
+      "doc2.txt": [
+        3
+      ]
+    },
+    "з": {
+      "doc2.txt": [
+        10
+      ]
+    },
+    "м": {
+      "doc2.txt": [
+        16
+      ]
+    },
+    "мовою": {
+      "doc2.txt": [
+        6
+      ]
+    },
+    "об": {
+      "doc2.txt": [
+        12
+      ]
+    },
+    "пам": {
+      "doc2.txt": [
+        14
+      ]
+    },
+    "привіт": {
+      "doc2.txt": [
+        0
+      ]
+    },
+    "світ": {
+      "doc2.txt": [
+        1
+      ]
+    },
+    "слівця": {
+      "doc2.txt": [
+        9
+      ]
+    },
+    "також": {
+      "doc2.txt": [
+        19
+      ]
+    },
+    "тут": {
+      "doc2.txt": [
+        7
+      ]
+    },
+    "українською": {
+      "doc2.txt": [
+        5
+      ]
+    },
+    "це": {
+      "doc2.txt": [
+        2
+      ]
+    },
+    "яті": {
+      "doc2.txt": [
+        15
+      ]
+    },
+    "яч": {
+      "doc2.txt": [
+        17
+      ]
+    },
+    "є": {
+      "doc2.txt": [
+        8
+      ]
+    },
+    "єкт": {
+      "doc2.txt": [
+        13
+      ]
+    }
+  }
+}

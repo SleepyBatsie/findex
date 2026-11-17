@@ -1,18 +1,18 @@
-# tests/test_lab3_mod2.py
-import pytest
+"""Tests for ranking scorers (TF-IDF, BM25) and sanity checks."""
+
 from findex.corpus import Document
 from findex.index import Index
-from findex.ranking import TfIdfScorer, BM25Scorer, Scorer
-from findex.search import search_ranked, SearchResult
+from findex.ranking import BM25Scorer, Scorer, TfIdfScorer
+from findex.search import search_ranked
 
 
-def test_scorer_protocol():
+def test_scorer_protocol() -> None:
     """Перевірка дотримання протоколу Scorer (Duck Typing)."""
     assert isinstance(TfIdfScorer(), Scorer)
     assert isinstance(BM25Scorer(), Scorer)
 
 
-def test_sanity_check_1_rare_vs_frequent():
+def test_sanity_check_1_rare_vs_frequent() -> None:
     """Sanity Check 1: Рідкісний термін має давати вищий бал, ніж частіший."""
     docs = [
         Document("rare_doc", None, "quantum physics"),
@@ -29,8 +29,8 @@ def test_sanity_check_1_rare_vs_frequent():
     assert res_rare[0].score > res_common[0].score
 
 
-def test_sanity_check_2_bm25_repetition_saturation():
-    """Sanity Check 2: 20-те повторення терміна додає менше балів, ніж перші повторення (насичення BM25)."""
+def test_sanity_check_2_bm25_repetition_saturation() -> None:
+    """Sanity Check 2: 20-те повторення терміна дає менший приріст балів (насичення BM25)."""
     scorer = BM25Scorer()
 
     score_1 = scorer.score(tf=1, df=1, num_docs=10, doc_len=100, avg_doc_len=100)
@@ -44,8 +44,8 @@ def test_sanity_check_2_bm25_repetition_saturation():
     assert gain_initial > gain_late * 5
 
 
-def test_sanity_check_3_length_normalization():
-    """Sanity Check 3: Короткий документ з 1 входженням вище за довгий документ з 1 входженням."""
+def test_sanity_check_3_length_normalization() -> None:
+    """Sanity Check 3: Короткий документ з 1 входженням вище за довгий з 1 входженням."""
     docs = [
         Document("short_doc", None, "python"),
         Document("long_doc", None, "python " + "other " * 100),

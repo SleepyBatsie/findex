@@ -1,7 +1,6 @@
-import pytest
 from findex.corpus import Document
 from findex.index import Index
-from findex.storage import save_index, open_index
+from findex.storage import open_index, save_index
 
 
 def test_index_dunder_and_properties(tmp_path):
