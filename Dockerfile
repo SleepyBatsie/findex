@@ -19,6 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     INDEX_PATH="/app/data/index.json" \
+    EMBEDDINGS_PATH="/app/data/embeddings.npy" \
     PORT="8000" \
     WORKERS="1"
 

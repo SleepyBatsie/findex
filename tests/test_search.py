@@ -48,13 +48,11 @@ def test_sanity_check_rare_term_beats_frequent() -> None:
 
 def test_sanity_check_bm25_saturation() -> None:
     scorer = BM25Scorer()
-    gain_early = (
-        scorer.score(tf=2, df=1, num_docs=10, doc_len=100, avg_doc_len=100)
-        - scorer.score(tf=1, df=1, num_docs=10, doc_len=100, avg_doc_len=100)
+    gain_early = scorer.score(tf=2, df=1, num_docs=10, doc_len=100, avg_doc_len=100) - scorer.score(
+        tf=1, df=1, num_docs=10, doc_len=100, avg_doc_len=100
     )
-    gain_late = (
-        scorer.score(tf=20, df=1, num_docs=10, doc_len=100, avg_doc_len=100)
-        - scorer.score(tf=19, df=1, num_docs=10, doc_len=100, avg_doc_len=100)
+    gain_late = scorer.score(tf=20, df=1, num_docs=10, doc_len=100, avg_doc_len=100) - scorer.score(
+        tf=19, df=1, num_docs=10, doc_len=100, avg_doc_len=100
     )
     assert gain_early > gain_late * 5
 

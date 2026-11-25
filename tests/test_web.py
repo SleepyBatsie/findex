@@ -1,4 +1,4 @@
-﻿# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 """FastAPI web API & Jinja2 UI tests using TestClient and dependency_overrides."""
 
 from pathlib import Path

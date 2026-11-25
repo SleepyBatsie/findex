@@ -1,0 +1,10 @@
+{
+  "model_name": "all-MiniLM-L6-v2",
+  "num_chunks": 3,
+  "dim": 384,
+  "chunk_doc_ids": [
+    "doc1.txt",
+    "doc2.txt",
+    "doc3.txt"
+  ]
+}

@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>findex — Повнотекстовий пошук</title>
+  <title>findex — Повнотекстовий та семантичний пошук</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -71,7 +71,7 @@
       flex-wrap: wrap;
     }
     input[type="text"] {
-      flex: 1 1 320px;
+      flex: 1 1 280px;
       padding: 0.7rem 0.95rem;
       font-size: 1rem;
       border: 1px solid #cbd5e1;
@@ -83,8 +83,8 @@
       box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
     }
     select, button {
-      padding: 0.7rem 1rem;
-      font-size: 0.95rem;
+      padding: 0.7rem 0.9rem;
+      font-size: 0.92rem;
       border-radius: 8px;
       border: 1px solid #cbd5e1;
       background: #fff;
@@ -211,7 +211,10 @@
     <header>
       <a class="brand" href="/">findex</a>
       {% if index_loaded %}
-        <span class="status-pill">Індекс активний: {{ num_docs }} док. / {{ num_terms }} термів</span>
+        <span class="status-pill">
+          Індекс активний: {{ num_docs }} док. / {{ num_terms }} термів
+          {% if semantic_loaded %} · Semantic OK{% endif %}
+        </span>
       {% else %}
         <span class="status-pill warn">Індекс не завантажено (503)</span>
       {% endif %}
@@ -223,9 +226,14 @@
           type="text"
           name="q"
           value="{{ q }}"
-          placeholder="Введіть пошуковий запит (напр. asyncio taskgroup або bm25)..."
+          placeholder="Введіть пошуковий запит (напр. asyncio taskgroup або перефразований опис)..."
           autofocus
         />
+        <select name="mode" aria-label="Режим пошуку">
+          <option value="lexical" {% if mode == "lexical" %}selected{% endif %}>Lexical</option>
+          <option value="semantic" {% if mode == "semantic" %}selected{% endif %}>Semantic</option>
+          <option value="hybrid" {% if mode == "hybrid" %}selected{% endif %}>Hybrid (RRF)</option>
+        </select>
         <select name="scorer" aria-label="Модель ранжування">
           <option value="bm25" {% if scorer == "bm25" %}selected{% endif %}>BM25</option>
           <option value="tfidf" {% if scorer == "tfidf" %}selected{% endif %}>TF-IDF</option>
@@ -239,6 +247,12 @@
       </div>
     </form>
 
+    {% if ui_error %}
+      <div class="hit-card" style="border-color: #fecaca; color: #b91c1c;">
+        {{ ui_error }}
+      </div>
+    {% endif %}
+
     {% if selected_doc %}
       <section class="doc-viewer">
         <div class="hit-header">
@@ -246,7 +260,7 @@
           <span class="score-badge">Токенів: {{ selected_doc.length }}</span>
         </div>
         {% if q %}
-          <p><a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page }}">← Назад до результатів</a></p>
+          <p><a href="/?q={{ q | urlencode }}&mode={{ mode }}&scorer={{ scorer }}&k={{ k }}&page={{ page }}">← Назад до результатів</a></p>
         {% endif %}
         <pre>{{ selected_doc.text or "(Текст документа недоступний на диску)" }}</pre>
       </section>
@@ -256,7 +270,7 @@
       <div class="meta-bar">
         <span>Знайдено збігів: <strong>{{ search_data.total_hits }}</strong></span>
         {% if search_data.total_pages > 0 %}
-          <span>Сторінка {{ search_data.page }} із {{ search_data.total_pages }} ({{ search_data.scorer | upper }})</span>
+          <span>Сторінка {{ search_data.page }} із {{ search_data.total_pages }} ({{ search_data.mode | upper }} · {{ search_data.scorer | upper }})</span>
         {% endif %}
       </div>
 
@@ -266,7 +280,7 @@
             <div class="hit-header">
               <a
                 class="hit-title"
-                href="/?q={{ q | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page }}&doc={{ hit.doc_id | urlencode }}"
+                href="/?q={{ q | urlencode }}&mode={{ mode }}&scorer={{ scorer }}&k={{ k }}&page={{ page }}&doc={{ hit.doc_id | urlencode }}"
               >
                 #{{ hit.rank }} · {{ hit.doc_id }}
               </a>
@@ -279,11 +293,11 @@
         {% if search_data.total_pages > 1 %}
           <nav class="pagination" aria-label="Сторінки результатів">
             {% if search_data.has_prev %}
-              <a class="page-link" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page - 1 }}">← Попередня</a>
+              <a class="page-link" href="/?q={{ q | urlencode }}&mode={{ mode }}&scorer={{ scorer }}&k={{ k }}&page={{ page - 1 }}">← Попередня</a>
             {% endif %}
             <span>Сторінка {{ search_data.page }} / {{ search_data.total_pages }}</span>
             {% if search_data.has_next %}
-              <a class="page-link" href="/?q={{ q | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page + 1 }}">Наступна →</a>
+              <a class="page-link" href="/?q={{ q | urlencode }}&mode={{ mode }}&scorer={{ scorer }}&k={{ k }}&page={{ page + 1 }}">Наступна →</a>
             {% endif %}
           </nav>
         {% endif %}

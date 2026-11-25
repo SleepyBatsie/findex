@@ -1,9 +1,10 @@
-"""Boolean and ranked search functions."""
+"""Boolean, scalar ranked, and vectorized NumPy ranked search functions."""
 
-import heapq
 import logging
 from dataclasses import dataclass, field
 from typing import Literal
+
+import numpy as np
 
 from findex.index import InvertedIndex
 from findex.parser import parse_query
@@ -92,13 +93,13 @@ def _resolve_scorer(scorer: Scorer | ScorerName | None) -> Scorer:
     return scorer
 
 
-def search_ranked(
+def search_ranked_python(
     index: InvertedIndex,
     query: str,
     scorer: Scorer | ScorerName | None = None,
     top_k: int = 10,
 ) -> list[SearchResult]:
-    """Rank documents matching query terms and return top_k results via heapq.nlargest."""
+    """Pure-Python baseline ranked search (Lab 3) kept for equivalence tests and benchmarks."""
     active_scorer = _resolve_scorer(scorer)
     terms = tokenize(query)
     if not terms or top_k <= 0:
@@ -127,8 +128,90 @@ def search_ranked(
             doc_scores[doc_id] = doc_scores.get(doc_id, 0.0) + term_score
 
     results = [SearchResult(score=score, doc_id=doc_id) for doc_id, score in doc_scores.items()]
-    ranked = heapq.nlargest(top_k, results)
-    logger.debug("Ranked search for %r returned %d hits", query, len(ranked))
+    results.sort(key=lambda r: (-r.score, r.doc_id))
+    return results[:top_k]
+
+
+def search_ranked(
+    index: InvertedIndex,
+    query: str,
+    scorer: Scorer | ScorerName | None = None,
+    top_k: int = 10,
+) -> list[SearchResult]:
+    """Vectorized NumPy ranked search using int32 postings and np.argpartition for top-k."""
+    active_scorer = _resolve_scorer(scorer)
+    terms = tokenize(query)
+    if not terms or top_k <= 0:
+        return []
+
+    num_docs = index.num_docs
+    if num_docs == 0:
+        return []
+
+    avg_len = index.avg_doc_length
+    doc_lengths_np = index.doc_lengths_np
+    postings_np = index.postings_np
+    doc_id_list = index.doc_id_list
+
+    total_scores = np.zeros(num_docs, dtype=np.float64)
+    matched_mask = np.zeros(num_docs, dtype=bool)
+    any_match = False
+
+    for term in terms:
+        entry = postings_np.get(term)
+        if entry is None:
+            continue
+        doc_indices, tfs = entry
+        if doc_indices.size == 0:
+            continue
+        any_match = True
+        df = int(doc_indices.size)
+        term_scores = active_scorer.score_array(
+            tfs=tfs,
+            df=df,
+            num_docs=num_docs,
+            doc_lens=doc_lengths_np[doc_indices],
+            avg_doc_len=avg_len,
+        )
+        total_scores[doc_indices] += term_scores
+        matched_mask[doc_indices] = True
+
+    if not any_match:
+        return []
+
+    candidate_indices = np.flatnonzero(matched_mask)
+    if candidate_indices.size == 0:
+        return []
+
+    candidate_scores = total_scores[candidate_indices]
+    k = min(top_k, int(candidate_indices.size))
+
+    if k < candidate_indices.size:
+        # Select top-k candidates in O(N) via argpartition with deterministic doc_id tie-breaking
+        rounded_scores = np.round(candidate_scores, 12)
+        kth_idx = candidate_scores.size - k
+        kth_score = float(np.partition(rounded_scores, kth_idx)[kth_idx])
+        strictly_better = np.flatnonzero(rounded_scores > kth_score)
+        tied = np.flatnonzero(rounded_scores == kth_score)
+        need_from_tied = k - int(strictly_better.size)
+        part_idx = np.concatenate([strictly_better, tied[:need_from_tied]])
+        top_doc_indices = candidate_indices[part_idx]
+        top_scores = candidate_scores[part_idx]
+    else:
+        top_doc_indices = candidate_indices
+        top_scores = candidate_scores
+
+    # Deterministic tie-breaking: descending score, ascending doc_id index
+    order = sorted(
+        range(top_doc_indices.size),
+        key=lambda i: (-round(float(top_scores[i]), 12), int(top_doc_indices[i])),
+    )
+
+    ranked = [
+        SearchResult(score=float(top_scores[i]), doc_id=doc_id_list[int(top_doc_indices[i])])
+        for i in order
+    ]
+    logger.debug("Vectorized ranked search for %r returned %d hits", query, len(ranked))
     return ranked
 
 
@@ -145,11 +228,7 @@ def search_ast(
         return []
 
     active_scorer = _resolve_scorer(scorer)
-    terms = [
-        tok
-        for tok in tokenize(query)
-        if tok not in {"and", "or", "not"}
-    ]
+    terms = [tok for tok in tokenize(query) if tok not in {"and", "or", "not"}]
 
     num_docs = index.num_docs
     avg_len = index.avg_doc_length
@@ -173,4 +252,5 @@ def search_ast(
                 )
 
     results = [SearchResult(score=score, doc_id=doc_id) for doc_id, score in doc_scores.items()]
-    return heapq.nlargest(top_k, results)
+    results.sort(key=lambda r: (-r.score, r.doc_id))
+    return results[:top_k]

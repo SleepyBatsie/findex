@@ -20,6 +20,11 @@ class Settings(BaseSettings):
         validation_alias="INDEX_PATH",
         description="Path to serialized JSON index loaded on startup.",
     )
+    embeddings_path: Path = Field(
+        default=Path("data/embeddings.npy"),
+        validation_alias="EMBEDDINGS_PATH",
+        description="Path to serialized .npy chunk embeddings loaded on startup.",
+    )
     host: str = Field(default="0.0.0.0", validation_alias="HOST")
     port: int = Field(default=8000, ge=1, le=65535, validation_alias="PORT")
     workers: int = Field(default=1, ge=1, validation_alias="WORKERS")

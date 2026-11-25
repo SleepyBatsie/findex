@@ -30,9 +30,7 @@ def discover_files(root: Path | str) -> list[Path]:
     files = [
         p
         for p in root_path.rglob("*")
-        if p.is_file()
-        and not p.name.startswith(".")
-        and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in SUPPORTED_EXTENSIONS
     ]
     return sorted(files, key=lambda p: p.relative_to(root_path).as_posix())
 

@@ -30,10 +30,7 @@ def save_index(index: InvertedIndex, path: Path | str) -> Path:
             for doc_id, meta in sorted(index.doc_meta.items())
         },
         "index": {
-            term: {
-                doc_id: list(positions)
-                for doc_id, positions in sorted(postings.items())
-            }
+            term: {doc_id: list(positions) for doc_id, positions in sorted(postings.items())}
             for term, postings in sorted(index.index.items())
         },
     }
@@ -70,9 +67,7 @@ def load_index(path: Path | str) -> InvertedIndex:
     raw_lengths = data.get("doc_lengths")
     if isinstance(raw_lengths, dict):
         lengths_dict = cast(dict[object, object], raw_lengths)
-        idx.doc_lengths = {
-            str(k): int(v) for k, v in lengths_dict.items() if isinstance(v, int)
-        }
+        idx.doc_lengths = {str(k): int(v) for k, v in lengths_dict.items() if isinstance(v, int)}
 
     raw_meta = data.get("doc_meta")
     if isinstance(raw_meta, dict):
@@ -102,9 +97,7 @@ def load_index(path: Path | str) -> InvertedIndex:
                 ):
                     if isinstance(pos_val, list):
                         pos_list = cast(list[object], pos_val)
-                        term_postings[str(doc_id_obj)] = [
-                            p for p in pos_list if isinstance(p, int)
-                        ]
+                        term_postings[str(doc_id_obj)] = [p for p in pos_list if isinstance(p, int)]
                 idx.index[str(term_obj)] = term_postings
 
     logger.info("Loaded index (%d terms, %d docs) from %s", len(idx), idx.num_docs, source)

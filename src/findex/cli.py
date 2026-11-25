@@ -1,4 +1,4 @@
-﻿"""Typer + Rich command-line interface for findex."""
+"""Typer + Rich command-line interface for findex."""
 
 import asyncio
 import json
@@ -20,6 +20,14 @@ from findex.crawler import DEFAULT_USER_AGENT, CrawlStats, crawl_to_jsonl
 from findex.index import ExecutorName, build_index
 from findex.ranking import ScorerName
 from findex.search import search_ast, search_ranked
+from findex.semantic import (
+    DEFAULT_EMBED_MODEL,
+    SearchMode,
+    SemanticIndex,
+    build_semantic_index,
+    search_hybrid,
+    search_semantic,
+)
 from findex.stats import compute_stats
 from findex.storage import load_index, save_index
 from findex.tokenize import tokenize
@@ -29,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="findex",
-    help="Full-text search engine CLI with web UI, async crawler, parallel index, and AST queries.",
+    help="Full-text and semantic search engine CLI with web UI, async crawler, and NumPy scoring.",
     no_args_is_help=True,
 )
 
@@ -123,12 +131,18 @@ def cmd_serve(
         Path | None,
         typer.Option("--index", "-i", help="Optional path to index.json (overrides INDEX_PATH)."),
     ] = None,
+    embeddings_path: Annotated[
+        Path | None,
+        typer.Option("--embeddings", "-e", help="Optional path to embeddings.npy."),
+    ] = None,
 ) -> None:
     """Start the FastAPI web search server via Uvicorn."""
     import uvicorn
 
     if index_path is not None:
         os.environ["INDEX_PATH"] = str(index_path)
+    if embeddings_path is not None:
+        os.environ["EMBEDDINGS_PATH"] = str(embeddings_path)
 
     uvicorn.run(
         "findex.web.app:app",
@@ -305,6 +319,55 @@ def cmd_index(
         _fail(f"Index build failed: {exc}")
 
 
+@app.command("embed")
+def cmd_embed(
+    index_path: Annotated[
+        Path,
+        typer.Argument(help="Path to the serialized index JSON file."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("-o", "--output", help="Destination .npy path for chunk embeddings."),
+    ] = Path("data/embeddings.npy"),
+    model_name: Annotated[
+        str,
+        typer.Option("--model", help="SentenceTransformer model name."),
+    ] = DEFAULT_EMBED_MODEL,
+    chunk_words: Annotated[
+        int,
+        typer.Option("--chunk-words", min=20, help="Number of words per document chunk."),
+    ] = 120,
+    overlap_words: Annotated[
+        int,
+        typer.Option("--overlap-words", min=0, help="Overlapping words between chunks."),
+    ] = 30,
+) -> None:
+    """Split indexed documents into chunks, compute normalized embeddings, and save .npy."""
+    err_console = Console(stderr=True)
+    try:
+        idx = load_index(index_path)
+        doc_texts: list[tuple[str, str]] = []
+        for doc_id, meta in sorted(idx.doc_meta.items()):
+            text = _lookup_doc_text(Path(meta.path), doc_id) if meta.path else ""
+            doc_texts.append((doc_id, text or doc_id))
+
+        sem_idx = build_semantic_index(
+            doc_texts,
+            model_name=model_name,
+            chunk_words=chunk_words,
+            overlap_words=overlap_words,
+        )
+        saved_path = sem_idx.save(output)
+        err_console.print(
+            f"Embedded [bold]{idx.num_docs}[/bold] documents into "
+            f"[bold]{len(sem_idx.chunk_doc_ids)}[/bold] chunks "
+            f"(shape={sem_idx.embeddings.shape}) -> [cyan]{saved_path}[/cyan]"
+        )
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        _fail(f"Embedding build failed: {exc}")
+
+
 @app.command("search")
 def cmd_search(
     index_path: Annotated[
@@ -323,6 +386,14 @@ def cmd_search(
         ScorerName,
         typer.Option("--scorer", help="Ranking model: bm25 or tfidf."),
     ] = "bm25",
+    mode: Annotated[
+        SearchMode,
+        typer.Option("--mode", help="Search mode: lexical, semantic, or hybrid."),
+    ] = "lexical",
+    embeddings_path: Annotated[
+        Path | None,
+        typer.Option("--embeddings", "-e", help="Path to .npy embeddings for semantic/hybrid."),
+    ] = None,
     boolean: Annotated[
         bool,
         typer.Option("--boolean", help="Parse query using boolean/phrase AST syntax."),
@@ -332,16 +403,24 @@ def cmd_search(
         typer.Option("--json", help="Emit search results as JSON to stdout."),
     ] = False,
 ) -> None:
-    """Search an index and output either a Rich table or JSON."""
+    """Search an index in lexical, semantic, or hybrid mode and output Rich table or JSON."""
     try:
         if not query.strip():
             raise ValueError("Query must not be empty")
 
         idx = load_index(index_path)
-        if boolean:
-            results = search_ast(idx, query, scorer=scorer, top_k=top_k)
+        if mode == "lexical":
+            if boolean:
+                results = search_ast(idx, query, scorer=scorer, top_k=top_k)
+            else:
+                results = search_ranked(idx, query, scorer=scorer, top_k=top_k)
         else:
-            results = search_ranked(idx, query, scorer=scorer, top_k=top_k)
+            emb_file = embeddings_path or index_path.with_name("embeddings.npy")
+            sem_idx = SemanticIndex.load(emb_file)
+            if mode == "semantic":
+                results = search_semantic(sem_idx, query, top_k=top_k)
+            else:
+                results = search_hybrid(idx, sem_idx, query, top_k=top_k)
 
         query_terms = [t for t in tokenize(query) if t not in {"and", "or", "not"}]
 
@@ -373,7 +452,8 @@ def cmd_search(
             out_console.print(f"No matches found for query: [bold]{query}[/bold]")
             return
 
-        table = Table(title=f"Search Results ({scorer.upper()}): {query}")
+        label = f"{mode.upper()} / {scorer.upper()}" if mode == "lexical" else mode.upper()
+        table = Table(title=f"Search Results ({label}): {query}")
         table.add_column("Rank", justify="right", style="cyan", no_wrap=True)
         table.add_column("Doc ID", style="green")
         table.add_column("Score", justify="right", style="magenta")

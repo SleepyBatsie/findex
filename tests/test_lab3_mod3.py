@@ -23,14 +23,8 @@ def test_parser_complex_query():
     parsed_ast = parse_query(query)
 
     expected_ast = And(
-        And(
-            And(
-                Term("python"),
-                Or(Term("async"), Term("await"))
-            ),
-            Not(Term("java"))
-        ),
-        Phrase(["event", "loop"])
+        And(And(Term("python"), Or(Term("async"), Term("await"))), Not(Term("java"))),
+        Phrase(["event", "loop"]),
     )
 
     assert parsed_ast == expected_ast

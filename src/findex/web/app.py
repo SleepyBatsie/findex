@@ -1,4 +1,4 @@
-"""FastAPI application with lifespan index loading, JSON API, and Jinja2 web UI."""
+"""FastAPI app with lifespan index loading, lexical/semantic/hybrid search, and Jinja2 UI."""
 
 import json
 import logging
@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from findex.index import InvertedIndex
 from findex.ranking import ScorerName
 from findex.search import search_ranked
+from findex.semantic import SearchMode, SemanticIndex, search_hybrid, search_semantic
 from findex.stats import compute_stats
 from findex.storage import load_index
 from findex.tokenize import tokenize
@@ -76,6 +77,11 @@ def get_optional_index(request: Request) -> InvertedIndex | None:
     return cast(InvertedIndex | None, getattr(request.app.state, "index", None))
 
 
+def get_optional_semantic(request: Request) -> SemanticIndex | None:
+    """Dependency returning loaded SemanticIndex or None if unavailable."""
+    return cast(SemanticIndex | None, getattr(request.app.state, "semantic_index", None))
+
+
 def require_index(
     idx: Annotated[InvertedIndex | None, Depends(get_optional_index)],
 ) -> InvertedIndex:
@@ -87,13 +93,28 @@ def require_index(
 
 def _execute_paginated_search(
     idx: InvertedIndex,
+    sem_idx: SemanticIndex | None,
     q: str,
     k: int,
     scorer: ScorerName,
+    mode: SearchMode,
     page: int,
 ) -> SearchResponse:
-    """Run ranked search using core dataclasses and slice requested page."""
-    all_hits = search_ranked(idx, q, scorer=scorer, top_k=max(idx.num_docs, page * k))
+    """Run lexical, semantic, or hybrid search and slice requested page."""
+    max_candidates = max(idx.num_docs, page * k)
+    if mode == "lexical":
+        all_hits = search_ranked(idx, q, scorer=scorer, top_k=max_candidates)
+    else:
+        if sem_idx is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Semantic embeddings (.npy) are not loaded on this server.",
+            )
+        if mode == "semantic":
+            all_hits = search_semantic(sem_idx, q, top_k=max_candidates)
+        else:
+            all_hits = search_hybrid(idx, sem_idx, q, top_k=max_candidates)
+
     total_hits = len(all_hits)
     total_pages = math.ceil(total_hits / k) if total_hits > 0 else 0
 
@@ -119,6 +140,7 @@ def _execute_paginated_search(
     return SearchResponse(
         query=q,
         scorer=scorer,
+        mode=mode,
         page=page,
         page_size=k,
         total_hits=total_hits,
@@ -130,7 +152,7 @@ def _execute_paginated_search(
 
 
 class _AppLifespan:
-    """Async context manager loading the search index once on startup."""
+    """Async context manager loading the lexical and optional semantic indexes on startup."""
 
     def __init__(self, application: FastAPI, settings_override: Settings | None = None) -> None:
         self._application = application
@@ -140,6 +162,8 @@ class _AppLifespan:
         cfg = self._settings_override if self._settings_override is not None else get_settings()
         self._application.state.settings = cfg
         self._application.state.index = None
+        self._application.state.semantic_index = None
+
         if cfg.index_path.is_file():
             try:
                 loaded = load_index(cfg.index_path)
@@ -155,15 +179,28 @@ class _AppLifespan:
         else:
             logger.warning("Index file %s not found; /health will return 503", cfg.index_path)
 
+        emb_candidate = (
+            cfg.embeddings_path
+            if cfg.embeddings_path.is_file()
+            else cfg.index_path.with_name("embeddings.npy")
+        )
+        if emb_candidate.is_file():
+            try:
+                self._application.state.semantic_index = SemanticIndex.load(emb_candidate)
+                logger.info("Loaded semantic embeddings from %s", emb_candidate)
+            except Exception:
+                logger.exception("Failed to load semantic embeddings from %s", emb_candidate)
+
     async def __aexit__(self, *args: object) -> None:
         self._application.state.index = None
+        self._application.state.semantic_index = None
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
     """Application factory creating configured FastAPI instance with lifespan."""
     application = FastAPI(
         title="findex Web Search",
-        version="0.7.0",
+        version="1.0.0",
         lifespan=lambda app_inst: _AppLifespan(app_inst, settings_override),
     )
 
@@ -197,6 +234,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     @application.get("/health", response_model=HealthResponse)
     def health_check(
         idx: Annotated[InvertedIndex | None, Depends(get_optional_index)],
+        sem_idx: Annotated[SemanticIndex | None, Depends(get_optional_semantic)],
     ) -> JSONResponse | HealthResponse:
         if idx is None:
             return JSONResponse(
@@ -204,6 +242,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 content=HealthResponse(
                     status="unavailable",
                     index_loaded=False,
+                    semantic_loaded=False,
                     num_docs=0,
                     num_terms=0,
                 ).model_dump(),
@@ -211,6 +250,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         return HealthResponse(
             status="ok",
             index_loaded=True,
+            semantic_loaded=sem_idx is not None,
             num_docs=idx.num_docs,
             num_terms=len(idx),
         )
@@ -218,14 +258,27 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     @application.get("/search", response_model=SearchResponse)
     async def api_search(
         idx: Annotated[InvertedIndex, Depends(require_index)],
+        sem_idx: Annotated[SemanticIndex | None, Depends(get_optional_semantic)],
         q: Annotated[str, Query(min_length=1, max_length=500, description="Search query")],
         k: Annotated[int, Query(ge=1, le=50, description="Results per page")] = 10,
         scorer: Annotated[Literal["bm25", "tfidf"], Query(description="Ranking model")] = "bm25",
+        mode: Annotated[
+            Literal["lexical", "semantic", "hybrid"],
+            Query(description="Search mode: lexical, semantic, or hybrid"),
+        ] = "lexical",
         page: Annotated[int, Query(ge=1, le=1000, description="1-based page number")] = 1,
     ) -> SearchResponse:
         if not q.strip():
             raise HTTPException(status_code=422, detail="Query parameter 'q' must not be blank.")
-        return _execute_paginated_search(idx=idx, q=q, k=k, scorer=scorer, page=page)
+        return _execute_paginated_search(
+            idx=idx,
+            sem_idx=sem_idx,
+            q=q,
+            k=k,
+            scorer=scorer,
+            mode=mode,
+            page=page,
+        )
 
     @application.get("/docs/{doc_id:path}", response_model=DocumentOut)
     def api_get_document(
@@ -261,15 +314,18 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     def web_ui_home(
         request: Request,
         idx: Annotated[InvertedIndex | None, Depends(get_optional_index)],
+        sem_idx: Annotated[SemanticIndex | None, Depends(get_optional_semantic)],
         q: Annotated[str, Query(max_length=500)] = "",
         k: Annotated[int, Query(ge=1, le=50)] = 10,
         scorer: Annotated[Literal["bm25", "tfidf"], Query()] = "bm25",
+        mode: Annotated[Literal["lexical", "semantic", "hybrid"], Query()] = "lexical",
         page: Annotated[int, Query(ge=1, le=1000)] = 1,
         doc: Annotated[str | None, Query()] = None,
     ) -> HTMLResponse:
         search_data: SearchResponse | None = None
         highlighted_hits: list[dict[str, Any]] = []
         selected_doc: DocumentOut | None = None
+        ui_error: str | None = None
 
         if idx is not None and doc:
             meta = idx.doc_meta.get(doc)
@@ -282,29 +338,43 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 )
 
         if idx is not None and q.strip():
-            search_data = _execute_paginated_search(idx=idx, q=q, k=k, scorer=scorer, page=page)
-            q_terms = tokenize(q)
-            for item in search_data.results:
-                highlighted_hits.append(
-                    {
-                        "rank": item.rank,
-                        "doc_id": item.doc_id,
-                        "score": item.score,
-                        "snippet_html": _highlight_snippet(item.snippet, q_terms),
-                    }
+            try:
+                search_data = _execute_paginated_search(
+                    idx=idx,
+                    sem_idx=sem_idx,
+                    q=q,
+                    k=k,
+                    scorer=scorer,
+                    mode=mode,
+                    page=page,
                 )
+                q_terms = tokenize(q)
+                for item in search_data.results:
+                    highlighted_hits.append(
+                        {
+                            "rank": item.rank,
+                            "doc_id": item.doc_id,
+                            "score": item.score,
+                            "snippet_html": _highlight_snippet(item.snippet, q_terms),
+                        }
+                    )
+            except HTTPException as exc:
+                ui_error = str(exc.detail)
 
         return templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
                 "index_loaded": idx is not None,
+                "semantic_loaded": sem_idx is not None,
                 "num_docs": idx.num_docs if idx is not None else 0,
                 "num_terms": len(idx) if idx is not None else 0,
                 "q": q,
                 "k": k,
                 "scorer": scorer,
+                "mode": mode,
                 "page": page,
+                "ui_error": ui_error,
                 "search_data": search_data,
                 "highlighted_hits": highlighted_hits,
                 "selected_doc": selected_doc,

@@ -19,6 +19,7 @@ class SearchResponse(BaseModel):
 
     query: str
     scorer: Literal["bm25", "tfidf"]
+    mode: Literal["lexical", "semantic", "hybrid"] = "lexical"
     page: int = Field(..., ge=1)
     page_size: int = Field(..., ge=1)
     total_hits: int = Field(..., ge=0)
@@ -28,8 +29,18 @@ class SearchResponse(BaseModel):
     results: list[SearchHitOut]
 
 
+class HealthResponse(BaseModel):
+    """Service readiness and index status payload for GET /health."""
+
+    status: Literal["ok", "unavailable"]
+    index_loaded: bool
+    semantic_loaded: bool = False
+    num_docs: int = Field(..., ge=0)
+    num_terms: int = Field(..., ge=0)
+
+
 class DocumentOut(BaseModel):
-    """Full document representation returned by GET /docs/{doc_id}."""
+    """Single document metadata and raw text returned by GET /docs/{doc_id}."""
 
     doc_id: str
     length: int = Field(..., ge=0)
@@ -38,26 +49,17 @@ class DocumentOut(BaseModel):
 
 
 class TermFreqOut(BaseModel):
-    """Top term entry in GET /stats."""
+    """Term frequency pair in corpus statistics."""
 
     term: str
     frequency: int = Field(..., ge=0)
 
 
 class StatsResponse(BaseModel):
-    """Index summary statistics returned by GET /stats."""
+    """Index summary statistics payload for GET /stats."""
 
     num_docs: int = Field(..., ge=0)
     num_terms: int = Field(..., ge=0)
     total_tokens: int = Field(..., ge=0)
     avg_doc_length: float = Field(..., ge=0.0)
     top_terms: list[TermFreqOut]
-
-
-class HealthResponse(BaseModel):
-    """Service readiness status returned by GET /health."""
-
-    status: Literal["ok", "unavailable"]
-    index_loaded: bool
-    num_docs: int = Field(default=0, ge=0)
-    num_terms: int = Field(default=0, ge=0)

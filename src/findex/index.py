@@ -1,4 +1,4 @@
-"""Positional inverted index and parallel build_partial / merge pipeline."""
+"""Positional inverted index with NumPy int32 postings and parallel merge pipeline."""
 
 import logging
 import time
@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import Literal
+
+import numpy as np
+from numpy.typing import NDArray
 
 from findex.corpus import Document, discover_files, read_documents
 from findex.tokenize import tokenize
@@ -67,16 +70,83 @@ class BuildMetrics:
 class InvertedIndex(Mapping[str, dict[str, list[int]]]):
     """
     Positional inverted index implementing collections.abc.Mapping.
-    Guarantees sorted postings by doc_id and ascending positions.
+    Maintains dict postings for compatibility and compiled NumPy int32 arrays for fast scoring.
     """
 
-    __slots__ = ("_index", "_doc_lengths", "doc_meta", "with_positions", "__dict__")
+    __slots__ = (
+        "_index",
+        "_doc_lengths",
+        "doc_meta",
+        "with_positions",
+        "_np_dirty",
+        "_doc_id_list",
+        "_doc_lengths_np",
+        "_postings_np",
+        "__dict__",
+    )
 
     def __init__(self, with_positions: bool = True) -> None:
         self._index: dict[str, dict[str, list[int]]] = {}
         self._doc_lengths: dict[str, int] = {}
         self.doc_meta: dict[str, DocMeta] = {}
         self.with_positions = with_positions
+        self._np_dirty: bool = True
+        self._doc_id_list: list[str] = []
+        self._doc_lengths_np: NDArray[np.int32] = np.empty(0, dtype=np.int32)
+        self._postings_np: dict[str, tuple[NDArray[np.int32], NDArray[np.int32]]] = {}
+
+    def _invalidate_caches(self) -> None:
+        self._np_dirty = True
+        if "avg_doc_length" in self.__dict__:
+            del self.__dict__["avg_doc_length"]
+
+    def compile_numpy(self) -> None:
+        """Compile postings and document lengths into contiguous NumPy int32 arrays."""
+        sorted_doc_ids = sorted(self._doc_lengths.keys())
+        self._doc_id_list = sorted_doc_ids
+        doc_to_idx = {doc_id: idx for idx, doc_id in enumerate(sorted_doc_ids)}
+
+        self._doc_lengths_np = np.array(
+            [self._doc_lengths[doc_id] for doc_id in sorted_doc_ids],
+            dtype=np.int32,
+        )
+
+        compiled_postings: dict[str, tuple[NDArray[np.int32], NDArray[np.int32]]] = {}
+        for term, postings in self._index.items():
+            # Sort by integer doc index (which matches sorted doc_id order)
+            pairs = sorted(
+                (doc_to_idx[doc_id], len(positions))
+                for doc_id, positions in postings.items()
+                if doc_id in doc_to_idx
+            )
+            if pairs:
+                doc_arr = np.array([p[0] for p in pairs], dtype=np.int32)
+                tf_arr = np.array([p[1] for p in pairs], dtype=np.int32)
+            else:
+                doc_arr = np.empty(0, dtype=np.int32)
+                tf_arr = np.empty(0, dtype=np.int32)
+            compiled_postings[term] = (doc_arr, tf_arr)
+
+        self._postings_np = compiled_postings
+        self._np_dirty = False
+
+    @property
+    def doc_id_list(self) -> list[str]:
+        if self._np_dirty:
+            self.compile_numpy()
+        return self._doc_id_list
+
+    @property
+    def doc_lengths_np(self) -> NDArray[np.int32]:
+        if self._np_dirty:
+            self.compile_numpy()
+        return self._doc_lengths_np
+
+    @property
+    def postings_np(self) -> dict[str, tuple[NDArray[np.int32], NDArray[np.int32]]]:
+        if self._np_dirty:
+            self.compile_numpy()
+        return self._postings_np
 
     @property
     def doc_metas(self) -> dict[str, DocMeta]:
@@ -95,6 +165,7 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
     @doc_lengths.setter
     def doc_lengths(self, value: dict[str, int]) -> None:
         self._doc_lengths = value
+        self._invalidate_caches()
 
     @property
     def index(self) -> dict[str, dict[str, list[int]]]:
@@ -104,15 +175,14 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
     @index.setter
     def index(self, value: dict[str, dict[str, list[int]]]) -> None:
         self._index = value
+        self._invalidate_caches()
 
     def build(self, docs: Iterable[Document]) -> None:
         """Build the inverted index from an iterable of documents."""
         self._index.clear()
         self._doc_lengths.clear()
         self.doc_meta.clear()
-
-        if "avg_doc_length" in self.__dict__:
-            del self.__dict__["avg_doc_length"]
+        self._invalidate_caches()
 
         sorted_docs = sorted(docs, key=lambda d: d.doc_id)
         for doc in sorted_docs:
@@ -134,6 +204,7 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
                 else:
                     doc_positions.append(0)
 
+        self.compile_numpy()
         logger.debug("Built index with %d terms across %d documents", len(self), self.num_docs)
 
     def get_postings(self, term: str) -> list[Posting]:
@@ -188,6 +259,8 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
         """Average token length across all indexed documents."""
         if not self._doc_lengths:
             return 0.0
+        if not self._np_dirty and self._doc_lengths_np.size > 0:
+            return float(np.mean(self._doc_lengths_np))
         return sum(self._doc_lengths.values()) / len(self._doc_lengths)
 
     def doc_len(self, doc_id: str) -> int:
@@ -230,11 +303,7 @@ def build_partial(
     Top-level module function safe for ProcessPoolExecutor ('spawn').
     """
     resolved_base = Path(base_dir) if base_dir is not None else None
-    docs = [
-        doc
-        for p in paths
-        for doc in read_documents(Path(p), base_dir=resolved_base)
-    ]
+    docs = [doc for p in paths for doc in read_documents(Path(p), base_dir=resolved_base)]
     partial = InvertedIndex(with_positions=with_positions)
     partial.build(docs)
     return partial
@@ -274,9 +343,9 @@ def merge(partials: Iterable[InvertedIndex]) -> InvertedIndex:
     merged.doc_meta = dict(sorted(raw_meta.items()))
     merged.doc_lengths = dict(sorted(raw_lengths.items()))
     merged.index = {
-        term: dict(sorted(postings.items()))
-        for term, postings in sorted(raw_index.items())
+        term: dict(sorted(postings.items())) for term, postings in sorted(raw_index.items())
     }
+    merged.compile_numpy()
     return merged
 
 
