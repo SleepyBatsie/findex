@@ -1,18 +1,23 @@
-"""Typer + Rich command-line interface for findex."""
+﻿"""Typer + Rich command-line interface for findex."""
 
+import asyncio
 import json
 import logging
+import os
 import sys
+import traceback
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, NoReturn, cast
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
-from findex.corpus import Document, discover_files, read_document
-from findex.index import InvertedIndex
+from findex.corpus import discover_files
+from findex.crawler import DEFAULT_USER_AGENT, CrawlStats, crawl_to_jsonl
+from findex.index import ExecutorName, build_index
 from findex.ranking import ScorerName
 from findex.search import search_ast, search_ranked
 from findex.stats import compute_stats
@@ -24,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="findex",
-    help="Full-text search engine CLI with BM25/TF-IDF ranking and AST queries.",
+    help="Full-text search engine CLI with web UI, async crawler, parallel index, and AST queries.",
     no_args_is_help=True,
 )
 
@@ -54,6 +59,36 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(code=1)
 
 
+def _render_crawl_dashboard(stats: CrawlStats, max_pages: int, start_url: str) -> Table:
+    """Build a live Rich status table showing crawler progress metrics."""
+    table = Table(title=f"findex crawl: {start_url}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right", style="green")
+    table.add_row("Pages Collected", f"{stats.pages_collected} / {max_pages}")
+    table.add_row("Pages / sec", f"{stats.pages_per_second:.2f}")
+    table.add_row("In-Flight Requests", str(stats.in_flight))
+    table.add_row("Errors", str(stats.errors))
+    table.add_row("Queue Depth", str(stats.queue_depth))
+    return table
+
+
+def _lookup_doc_text(doc_file: Path, doc_id: str) -> str:
+    """Retrieve document text for snippet generation from plain text or JSONL files."""
+    if not doc_file.is_file():
+        return ""
+    if doc_file.suffix.lower() != ".jsonl":
+        return doc_file.read_text(encoding="utf-8", errors="replace")
+    with doc_file.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            obj = cast(dict[str, object], json.loads(line))
+            if str(obj.get("doc_id") or obj.get("url") or "") == doc_id:
+                return str(obj.get("text", ""))
+    return ""
+
+
 @app.callback()
 def main_callback(
     verbose: Annotated[
@@ -70,24 +105,177 @@ def main_callback(
     configure_logging(verbose)
 
 
+@app.command("serve")
+def cmd_serve(
+    host: Annotated[
+        str,
+        typer.Option("--host", help="Bind host address."),
+    ] = "0.0.0.0",
+    port: Annotated[
+        int,
+        typer.Option("--port", min=1, max=65535, help="Bind port number."),
+    ] = 8000,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", min=1, help="Number of Uvicorn worker processes."),
+    ] = 1,
+    index_path: Annotated[
+        Path | None,
+        typer.Option("--index", "-i", help="Optional path to index.json (overrides INDEX_PATH)."),
+    ] = None,
+) -> None:
+    """Start the FastAPI web search server via Uvicorn."""
+    import uvicorn
+
+    if index_path is not None:
+        os.environ["INDEX_PATH"] = str(index_path)
+
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+    )
+
+
+@app.command("crawl")
+def cmd_crawl(
+    start_url: Annotated[
+        str,
+        typer.Argument(help="Seed URL to start polite asynchronous crawling."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("-o", "--output", help="Destination JSONL path for crawled pages."),
+    ] = Path("crawled.jsonl"),
+    log_file: Annotated[
+        Path,
+        typer.Option("--log", help="Log file recording per-URL HTTP status and errors."),
+    ] = Path("crawl.log"),
+    max_pages: Annotated[
+        int,
+        typer.Option("--max-pages", min=1, help="Maximum number of pages to collect."),
+    ] = 200,
+    concurrency: Annotated[
+        int,
+        typer.Option("-c", "--concurrency", min=1, help="Maximum concurrent HTTP requests."),
+    ] = 10,
+    per_host: Annotated[
+        int,
+        typer.Option("--per-host", min=1, help="Maximum concurrent requests per host."),
+    ] = 2,
+    delay: Annotated[
+        float,
+        typer.Option("--delay", min=0.0, help="Minimum delay in seconds between same-host hits."),
+    ] = 0.2,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=0.1, help="Per-request timeout in seconds."),
+    ] = 10.0,
+    user_agent: Annotated[
+        str,
+        typer.Option("--user-agent", help="Honest User-Agent header with contact info."),
+    ] = DEFAULT_USER_AGENT,
+    same_host: Annotated[
+        bool,
+        typer.Option("--same-host/--allow-external", help="Restrict crawling to seed host."),
+    ] = True,
+    debug_loop: Annotated[
+        bool,
+        typer.Option("--debug", help="Enable asyncio debug mode to detect event loop blocking."),
+    ] = False,
+) -> None:
+    """Politely crawl web pages asynchronously and stream them into JSONL."""
+    err_console = Console(stderr=True)
+    stats = CrawlStats()
+
+    async def _run() -> None:
+        if debug_loop:
+            loop = asyncio.get_running_loop()
+            loop.set_debug(True)
+            loop.slow_callback_duration = 0.1
+
+        done_refresh = asyncio.Event()
+
+        with Live(
+            _render_crawl_dashboard(stats, max_pages, start_url),
+            console=err_console,
+            refresh_per_second=8,
+        ) as live:
+
+            async def _refresh_ui() -> None:
+                while not done_refresh.is_set():
+                    live.update(_render_crawl_dashboard(stats, max_pages, start_url))
+                    await asyncio.sleep(0.12)
+                live.update(_render_crawl_dashboard(stats, max_pages, start_url))
+
+            ui_task = asyncio.create_task(_refresh_ui())
+            try:
+                await crawl_to_jsonl(
+                    start_url,
+                    output,
+                    log_path=log_file,
+                    max_pages=max_pages,
+                    concurrency=concurrency,
+                    per_host_concurrency=per_host,
+                    min_delay=delay,
+                    timeout=timeout,
+                    user_agent=user_agent,
+                    same_host_only=same_host,
+                    stats=stats,
+                )
+            finally:
+                done_refresh.set()
+                await ui_task
+
+    try:
+        asyncio.run(_run(), debug=debug_loop)
+        err_console.print(
+            f"Crawled [bold]{stats.pages_collected}[/bold] pages in "
+            f"[bold]{stats.elapsed_seconds:.2f}s[/bold] "
+            f"([bold]{stats.pages_per_second:.2f}[/bold] pages/s, errors={stats.errors}) "
+            f"-> [cyan]{output}[/cyan] (log: [cyan]{log_file}[/cyan])"
+        )
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        _fail(f"Crawl failed: {exc}")
+
+
 @app.command("index")
 def cmd_index(
     corpus_dir: Annotated[
         Path,
-        typer.Argument(help="Directory or file containing documents to index."),
+        typer.Argument(help="Directory or file (including JSONL) containing documents to index."),
     ],
     output: Annotated[
         Path,
         typer.Option("-o", "--output", help="Destination JSON path for the built index."),
     ] = Path("index.json"),
+    workers: Annotated[
+        int,
+        typer.Option(
+            "-w",
+            "--workers",
+            min=1,
+            help="Number of worker threads or processes.",
+        ),
+    ] = max(1, os.cpu_count() or 1),
+    executor: Annotated[
+        ExecutorName,
+        typer.Option(
+            "--executor",
+            help="Execution backend: serial, threads, or processes.",
+        ),
+    ] = "processes",
 ) -> None:
-    """Build an inverted index from a directory of documents."""
+    """Build an inverted index from a directory of documents or crawled JSONL."""
     err_console = Console(stderr=True)
     try:
         files = discover_files(corpus_dir)
-        base_dir = corpus_dir if corpus_dir.is_dir() else corpus_dir.parent
+    except (FileNotFoundError, OSError) as exc:
+        _fail(str(exc))
 
-        docs: list[Document] = []
+    try:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -95,21 +283,26 @@ def cmd_index(
             TaskProgressColumn(),
             console=err_console,
         ) as progress:
-            task = progress.add_task("Indexing documents...", total=len(files))
-            for file_path in files:
-                docs.append(read_document(file_path, base_dir=base_dir))
-                progress.advance(task)
+            task = progress.add_task(
+                f"Indexing ({executor}, workers={workers})...",
+                total=len(files),
+            )
+            idx = build_index(
+                corpus_dir,
+                workers=workers,
+                executor=executor,
+                on_chunk_done=lambda count: progress.advance(task, advance=count),
+            )
 
-        idx = InvertedIndex()
-        idx.build(docs)
         saved_path = save_index(idx, output)
         logger.info("Index successfully saved to %s", saved_path)
         err_console.print(
             f"Indexed [bold]{idx.num_docs}[/bold] documents "
             f"([bold]{len(idx)}[/bold] unique terms) -> [cyan]{saved_path}[/cyan]"
         )
-    except (FileNotFoundError, ValueError, OSError) as exc:
-        _fail(str(exc))
+    except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        _fail(f"Index build failed: {exc}")
 
 
 @app.command("search")
@@ -157,9 +350,8 @@ def cmd_search(
             snippet = ""
             meta = idx.doc_meta.get(res.doc_id)
             if meta is not None and meta.path is not None:
-                doc_file = Path(meta.path)
-                if doc_file.is_file():
-                    text = doc_file.read_text(encoding="utf-8", errors="replace")
+                text = _lookup_doc_text(Path(meta.path), res.doc_id)
+                if text:
                     snippet = generate_snippet(text, query_terms, window=50)
             rows.append((rank, res.doc_id, res.score, snippet))
 
@@ -188,7 +380,7 @@ def cmd_search(
         table.add_column("Snippet", style="white")
 
         for rank, doc_id, score, snippet in rows:
-            table.add_row(str(rank), doc_id, f"{score:.4f}", snippet or "—")
+            table.add_row(str(rank), doc_id, f"{score:.4f}", snippet or "-")
 
         out_console.print(table)
     except (FileNotFoundError, ValueError, OSError) as exc:

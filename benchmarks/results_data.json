@@ -1,0 +1,125 @@
+{
+  "cpu_model": "11th Gen Intel(R) Core(TM) i5-11320H @ 3.20GHz",
+  "cpu_count": 8,
+  "python_version": "3.13.15",
+  "worker_counts": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "series": {
+    "serial": [
+      {
+        "workers": 1,
+        "wall_s": 2.8184,
+        "cpu_s": 2.7969,
+        "peak_rss_mb": 230.64,
+        "merge_s": 0.357,
+        "speedup": 1.0
+      }
+    ],
+    "threads_gil": [
+      {
+        "workers": 1,
+        "wall_s": 2.8183,
+        "cpu_s": 2.7969,
+        "peak_rss_mb": 230.64,
+        "merge_s": 0.364,
+        "speedup": 1.0
+      },
+      {
+        "workers": 2,
+        "wall_s": 2.785,
+        "cpu_s": 3.0,
+        "peak_rss_mb": 236.43,
+        "merge_s": 0.3772,
+        "speedup": 1.01
+      },
+      {
+        "workers": 4,
+        "wall_s": 2.8016,
+        "cpu_s": 3.1406,
+        "peak_rss_mb": 240.98,
+        "merge_s": 0.3695,
+        "speedup": 1.01
+      },
+      {
+        "workers": 8,
+        "wall_s": 2.989,
+        "cpu_s": 3.375,
+        "peak_rss_mb": 240.98,
+        "merge_s": 0.3585,
+        "speedup": 0.94
+      }
+    ],
+    "processes": [
+      {
+        "workers": 1,
+        "wall_s": 3.7073,
+        "cpu_s": 0.4844,
+        "peak_rss_mb": 231.14,
+        "merge_s": 0.1817,
+        "speedup": 0.76
+      },
+      {
+        "workers": 2,
+        "wall_s": 2.546,
+        "cpu_s": 0.5,
+        "peak_rss_mb": 240.98,
+        "merge_s": 0.1445,
+        "speedup": 1.11
+      },
+      {
+        "workers": 4,
+        "wall_s": 2.2482,
+        "cpu_s": 0.5312,
+        "peak_rss_mb": 240.98,
+        "merge_s": 0.2048,
+        "speedup": 1.25
+      },
+      {
+        "workers": 8,
+        "wall_s": 3.234,
+        "cpu_s": 0.6406,
+        "peak_rss_mb": 240.98,
+        "merge_s": 0.2191,
+        "speedup": 0.87
+      }
+    ],
+    "threads_nogil": [
+      {
+        "workers": 1,
+        "wall_s": 3.728,
+        "cpu_s": 3.7344,
+        "peak_rss_mb": 292.77,
+        "merge_s": 0.4871,
+        "speedup": 0.76
+      },
+      {
+        "workers": 2,
+        "wall_s": 2.5676,
+        "cpu_s": 3.9844,
+        "peak_rss_mb": 295.38,
+        "merge_s": 0.468,
+        "speedup": 1.1
+      },
+      {
+        "workers": 4,
+        "wall_s": 2.0337,
+        "cpu_s": 4.6875,
+        "peak_rss_mb": 295.38,
+        "merge_s": 0.4582,
+        "speedup": 1.39
+      },
+      {
+        "workers": 8,
+        "wall_s": 1.8525,
+        "cpu_s": 6.6406,
+        "peak_rss_mb": 295.38,
+        "merge_s": 0.4418,
+        "speedup": 1.52
+      }
+    ]
+  }
+}

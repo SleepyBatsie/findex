@@ -1,14 +1,20 @@
-"""Positional inverted index implementing collections.abc.Mapping."""
+"""Positional inverted index and parallel build_partial / merge pipeline."""
 
 import logging
-from collections.abc import Iterable, Iterator, Mapping
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import cached_property
+from pathlib import Path
+from typing import Literal
 
-from findex.corpus import Document
+from findex.corpus import Document, discover_files, read_documents
 from findex.tokenize import tokenize
 
 logger = logging.getLogger(__name__)
+
+ExecutorName = Literal["serial", "threads", "processes"]
 
 
 def _empty_positions() -> list[int]:
@@ -44,6 +50,18 @@ class DocMeta:
     doc_id: str
     length: int
     path: str | None = None
+
+
+@dataclass(frozen=True)
+class BuildMetrics:
+    """Execution timing breakdown for index construction."""
+
+    total_seconds: float
+    map_seconds: float
+    merge_seconds: float
+    num_chunks: int
+    workers: int
+    executor: ExecutorName
 
 
 class InvertedIndex(Mapping[str, dict[str, list[int]]]):
@@ -116,7 +134,7 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
                 else:
                     doc_positions.append(0)
 
-        logger.info("Built index with %d terms across %d documents", len(self), self.num_docs)
+        logger.debug("Built index with %d terms across %d documents", len(self), self.num_docs)
 
     def get_postings(self, term: str) -> list[Posting]:
         """Return sorted list of Posting entries for a given term."""
@@ -182,3 +200,186 @@ class InvertedIndex(Mapping[str, dict[str, list[int]]]):
 
 
 Index = InvertedIndex
+
+
+def chunk_paths(paths: Sequence[Path], num_chunks: int) -> list[list[Path]]:
+    """Split file paths into contiguous, non-overlapping ranges for parallel workers."""
+    if num_chunks <= 0:
+        raise ValueError(f"num_chunks must be >= 1, got {num_chunks}")
+    if not paths:
+        return []
+    total = len(paths)
+    actual_chunks = min(num_chunks, total)
+    base_size, remainder = divmod(total, actual_chunks)
+    chunks: list[list[Path]] = []
+    start = 0
+    for i in range(actual_chunks):
+        end = start + base_size + (1 if i < remainder else 0)
+        chunks.append(list(paths[start:end]))
+        start = end
+    return chunks
+
+
+def build_partial(
+    paths: Sequence[Path | str],
+    base_dir: Path | str | None = None,
+    with_positions: bool = True,
+) -> InvertedIndex:
+    """
+    Build a partial InvertedIndex from a sequence of file paths.
+    Top-level module function safe for ProcessPoolExecutor ('spawn').
+    """
+    resolved_base = Path(base_dir) if base_dir is not None else None
+    docs = [
+        doc
+        for p in paths
+        for doc in read_documents(Path(p), base_dir=resolved_base)
+    ]
+    partial = InvertedIndex(with_positions=with_positions)
+    partial.build(docs)
+    return partial
+
+
+def merge(partials: Iterable[InvertedIndex]) -> InvertedIndex:
+    """
+    Merge multiple partial InvertedIndex instances into a single unified InvertedIndex.
+    Preserves deterministic sorting of doc_ids, postings, and metadata.
+    """
+    partial_list = list(partials)
+    if not partial_list:
+        return InvertedIndex()
+
+    with_positions = partial_list[0].with_positions
+    merged = InvertedIndex(with_positions=with_positions)
+
+    raw_index: dict[str, dict[str, list[int]]] = {}
+    raw_lengths: dict[str, int] = {}
+    raw_meta: dict[str, DocMeta] = {}
+
+    for partial in partial_list:
+        if partial.with_positions != with_positions:
+            raise ValueError("Cannot merge indexes with different with_positions settings")
+
+        for doc_id, meta in partial.doc_meta.items():
+            if doc_id in raw_meta:
+                raise ValueError(f"Duplicate doc_id encountered during merge: {doc_id}")
+            raw_meta[doc_id] = meta
+            raw_lengths[doc_id] = partial.doc_len(doc_id)
+
+        for term, postings in partial.index.items():
+            target_postings = raw_index.setdefault(term, {})
+            for doc_id, positions in postings.items():
+                target_postings[doc_id] = list(positions)
+
+    merged.doc_meta = dict(sorted(raw_meta.items()))
+    merged.doc_lengths = dict(sorted(raw_lengths.items()))
+    merged.index = {
+        term: dict(sorted(postings.items()))
+        for term, postings in sorted(raw_index.items())
+    }
+    return merged
+
+
+def build_index(
+    corpus_dir: Path | str,
+    *,
+    workers: int = 1,
+    executor: ExecutorName = "processes",
+    with_positions: bool = True,
+    on_chunk_done: Callable[[int], None] | None = None,
+    metrics_out: list[BuildMetrics] | None = None,
+) -> InvertedIndex:
+    """
+    Build an InvertedIndex using serial loop, ThreadPoolExecutor, or ProcessPoolExecutor
+    via top-level build_partial and merge.
+    """
+    if workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
+    if executor not in ("serial", "threads", "processes"):
+        raise ValueError(f"Unsupported executor: {executor}")
+
+    t_start = time.perf_counter()
+    root_path = Path(corpus_dir)
+    base_dir = root_path if root_path.is_dir() else root_path.parent
+    files = discover_files(root_path)
+
+    if not files:
+        empty_idx = InvertedIndex(with_positions=with_positions)
+        if metrics_out is not None:
+            elapsed = time.perf_counter() - t_start
+            metrics_out.append(
+                BuildMetrics(
+                    total_seconds=elapsed,
+                    map_seconds=0.0,
+                    merge_seconds=0.0,
+                    num_chunks=0,
+                    workers=workers,
+                    executor=executor,
+                )
+            )
+        return empty_idx
+
+    chunks = chunk_paths(files, workers)
+    t_map_start = time.perf_counter()
+    partials: list[InvertedIndex] = []
+
+    if executor == "serial":
+        for chunk in chunks:
+            partials.append(build_partial(chunk, base_dir, with_positions))
+            if on_chunk_done is not None:
+                on_chunk_done(len(chunk))
+    elif executor == "threads":
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_size = {
+                pool.submit(build_partial, chunk, base_dir, with_positions): len(chunk)
+                for chunk in chunks
+            }
+            try:
+                for fut in as_completed(future_to_size):
+                    partials.append(fut.result())
+                    if on_chunk_done is not None:
+                        on_chunk_done(future_to_size[fut])
+            except BaseException:
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            future_to_size = {
+                pool.submit(build_partial, chunk, base_dir, with_positions): len(chunk)
+                for chunk in chunks
+            }
+            try:
+                for fut in as_completed(future_to_size):
+                    partials.append(fut.result())
+                    if on_chunk_done is not None:
+                        on_chunk_done(future_to_size[fut])
+            except BaseException:
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+
+    t_merge_start = time.perf_counter()
+    merged = merge(partials)
+    t_end = time.perf_counter()
+
+    if metrics_out is not None:
+        metrics_out.append(
+            BuildMetrics(
+                total_seconds=t_end - t_start,
+                map_seconds=t_merge_start - t_map_start,
+                merge_seconds=t_end - t_merge_start,
+                num_chunks=len(chunks),
+                workers=workers,
+                executor=executor,
+            )
+        )
+
+    logger.info(
+        "Built index (%d terms, %d docs) via %s (workers=%d) in %.4fs (merge=%.4fs)",
+        len(merged),
+        merged.num_docs,
+        executor,
+        workers,
+        t_end - t_start,
+        t_end - t_merge_start,
+    )
+    return merged
